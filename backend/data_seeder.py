@@ -2,6 +2,7 @@ import asyncio
 import logging
 from faker import Faker
 import random
+from typing import List
 from datetime import datetime, timedelta
 from models import User, Item, Interaction, ContentType, InteractionType
 from database import get_db_manager
