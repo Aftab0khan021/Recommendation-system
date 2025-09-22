@@ -192,7 +192,15 @@ class DatabaseManager:
             
             cursor = self.db.items.find(match_filter).sort([("rating", -1), ("view_count", -1)]).limit(limit)
             results = await cursor.to_list(length=limit)
-            return results
+            
+            # Convert MongoDB documents to clean dictionaries (remove ObjectId)
+            clean_results = []
+            for item in results:
+                # Remove the MongoDB _id field and convert to clean dict
+                clean_item = {k: v for k, v in item.items() if k != '_id'}
+                clean_results.append(clean_item)
+            
+            return clean_results
             
         except Exception as e:
             logger.error(f"Error getting similar items: {e}")
