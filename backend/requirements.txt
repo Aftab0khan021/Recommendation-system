@@ -28,3 +28,4 @@ scikit-learn>=1.4.0
 xgboost>=2.0.0
 Faker>=24.0.0
 starlette>=0.37.2
+gunicorn>=21.2.0

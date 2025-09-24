@@ -6,7 +6,9 @@ import logging
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-
+from dotenv import load_dotenv
+load_dotenv()
+SEED_ON_STARTUP = os.getenv("SEED_ON_STARTUP", "false").lower() == "true"
 # Import our modules
 from models import (
     EventData, RecommendationRequest, RecommendationResponse, 
@@ -45,19 +47,21 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database initialized")
         
         # Check if we need to seed data
-        user_count = await db.db.users.count_documents({})
-        item_count = await db.db.items.count_documents({})
-        
-        if user_count == 0 or item_count == 0:
-            logger.info("No data found, seeding database...")
+         user_count = await db.db.users.count_documents({})
+         item_count = await db.db.items.count_documents({})
+         if SEED_ON_STARTUP and (user_count == 0 or item_count == 0):
+            logger.info("Seeding database (SEED_ON_STARTUP=true)...")
             seeder = DataSeeder()
             await seeder.seed_all_data(users_count=500, items_count=2000, interactions_count=20000)
             app_state['data_seeded'] = True
             logger.info("✅ Database seeded with sample data")
-        else:
-            logger.info(f"✅ Database already contains {user_count} users and {item_count} items")
+         else:
+            if user_count == 0 or item_count == 0:
+                logger.info("⏭️ Skipping seeding (SEED_ON_STARTUP=false). DB is empty; seed manually for prod.")
+            else:
+                logger.info(f"✅ Database already contains {user_count} users and {item_count} items")
             app_state['data_seeded'] = True
-        
+
         # Initialize recommendation engine
         rec_engine = await get_recommendation_engine()
         app_state['recommendation_engine_ready'] = True
@@ -212,11 +216,12 @@ async def get_recommendations(
             experiment_id='recommendation_algorithm_v1',
             event_type='recommendation_request',
             event_data={
-                'algorithm': algorithm,
-                'n_requested': n,
-                'content_type': content_type,
-                'n_returned': len(recommendations)
-            }
+    'algorithm': algorithm,
+    'n_requested': n,
+    'content_type': content_type,
+    'n_returned': len(recommendations),
+    'recommended_item_ids': [r['item_id'] for r in recommendations]
+}
         )
         
         return RecommendationResponse(
@@ -267,9 +272,7 @@ async def ai_search(request: SearchRequest):
     """Advanced AI-powered natural language search"""
     try:
         # Validate content type
-        if request.content_type and request.content_type not in ContentType:
-            raise HTTPException(status_code=400, detail="Invalid content type")
-        
+        from models import ContentType  # ensure imported
         # Force AI search type
         request.search_type = "ai"
         
@@ -494,5 +497,5 @@ async def root():
     }
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    import uvicorn, os
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

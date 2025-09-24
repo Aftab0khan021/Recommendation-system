@@ -5,6 +5,7 @@ module.exports = {
     "./src/**/*.{js,jsx,ts,tsx}",
     "./public/index.html"
   ],
+   safelist: ['bg-green-500', 'bg-red-500'],
   theme: {
   	extend: {
   		borderRadius: {

@@ -126,7 +126,8 @@ class SearchEngine:
             if intent['type'] == 'similar_to':
                 results = await self.find_similar_content(intent['target'], request)
             elif intent['type'] == 'category_filter':
-                results = await self.search_by_category(intent['category'], intent.get('content_type'), request)
+                category = intent.get('category') or intent.get('target') or ""
+                results = await self.search_by_category(category, intent.get('content_type'), request)
             elif intent['type'] == 'recommendation_request':
                 results = await self.get_personalized_recommendations(intent['target'], request)
             elif intent['type'] == 'educational':
@@ -165,7 +166,8 @@ class SearchEngine:
                     intent['type'] = intent_type
                     intent['confidence'] = 0.8
                     intent['target'] = match.group(1).strip()
-                    
+                    if intent_type == 'category_filter':
+                        intent['category'] = match.group(1).strip()
                     # Extract content type if present
                     for content_type in self.search_keywords:
                         if any(keyword in query for keyword in self.search_keywords[content_type]):
