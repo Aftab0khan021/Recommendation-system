@@ -47,15 +47,15 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database initialized")
         
         # Check if we need to seed data
-         user_count = await db.db.users.count_documents({})
-         item_count = await db.db.items.count_documents({})
-         if SEED_ON_STARTUP and (user_count == 0 or item_count == 0):
+        user_count = await db.db.users.count_documents({})
+        item_count = await db.db.items.count_documents({})
+        if SEED_ON_STARTUP and (user_count == 0 or item_count == 0):
             logger.info("Seeding database (SEED_ON_STARTUP=true)...")
             seeder = DataSeeder()
             await seeder.seed_all_data(users_count=500, items_count=2000, interactions_count=20000)
             app_state['data_seeded'] = True
             logger.info("✅ Database seeded with sample data")
-         else:
+        else:
             if user_count == 0 or item_count == 0:
                 logger.info("⏭️ Skipping seeding (SEED_ON_STARTUP=false). DB is empty; seed manually for prod.")
             else:
@@ -94,16 +94,25 @@ app = FastAPI(
 
 # Create API router
 api_router = APIRouter(prefix="/api")
-
+@app.on_event("startup")
+async def _attach_engine():
+    db = get_database()  # adapt to your project
+    eng = RecommendationEngine(db=db)
+    eng.initialize()     # if your class exposes such a method; otherwise build/train as you already do
+    app.state.engine = eng
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+engine = RecommendationEngine(...)
+# ... training/build steps ...
+logger.info("✅ Recommendation engine initialized")
 
+app.state.engine = engine
 # Health check endpoint
 @api_router.get("/health")
 async def health_check():
@@ -162,7 +171,17 @@ async def log_event(event: EventData):
     except Exception as e:
         logger.error(f"Error logging event: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+@app.get("/api/recommendations")
+def get_recommendations(user: str = Query(...), limit: int = 12):
+    try:
+        eng = app.state.engine
+        items = eng.recommend(user_id=user, k=limit)
+        return {"items": items, "count": len(items), "user": user}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 # Recommendations endpoint
 @api_router.get("/recommend", response_model=RecommendationResponse)
 async def get_recommendations(
