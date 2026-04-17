@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { X, Heart, Share2, Bookmark, ShoppingCart, Play, Eye, Star, TrendingUp, Clock, User } from 'lucide-react';
 
 const CONTENT_TYPE_ICONS = {
@@ -24,6 +24,15 @@ const CONTENT_TYPE_COLORS = {
 };
 
 const ItemModal = ({ item, isOpen, onClose, onInteraction }) => {
+  // BUG-7 fix: hooks MUST be called unconditionally — moved above the early return
+  const openedAtRef = useRef(Date.now());
+  useEffect(() => {
+    if (isOpen && item) {
+      openedAtRef.current = Date.now();
+    }
+  }, [item?.item_id, isOpen]);
+
+  // Safe to early-return AFTER all hooks have been called
   if (!isOpen || !item) return null;
 
   const contentTypeClass = CONTENT_TYPE_COLORS[item.content_type] || 'bg-gray-100 text-gray-800 border-gray-200';
@@ -36,6 +45,9 @@ const ItemModal = ({ item, isOpen, onClose, onInteraction }) => {
   };
 
   const handleAction = (actionType) => {
+    // Compute REAL seconds since modal opened instead of random number
+    const realDwellSeconds = Math.round((Date.now() - openedAtRef.current) / 1000);
+
     const context = { 
       source: 'modal',
       action: actionType,
@@ -44,7 +56,7 @@ const ItemModal = ({ item, isOpen, onClose, onInteraction }) => {
     };
     
     if (actionType === 'view') {
-      context.view_duration = Math.floor(Math.random() * 600) + 60; // 1-10 minutes
+      context.view_duration = realDwellSeconds;
     }
     
     onInteraction(item.item_id, actionType, context);

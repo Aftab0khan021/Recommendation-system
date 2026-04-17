@@ -85,17 +85,33 @@ const Navigation = ({
               </button>
 
               {showUserMenu && (
-                <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-xl border border-gray-200 py-2 z-50">
+                <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-xl border border-gray-200 py-2 z-50">
                   <div className="px-4 py-2 text-sm text-gray-600 border-b border-gray-100">
-                    Current User: {currentUser}
+                    Current User: <span className="font-semibold text-gray-800">{currentUser}</span>
                   </div>
-                  <button className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
-                    View Profile
-                  </button>
-                  <button className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+                  {/* BUG-12 fix: functional link to user profile */}
+                  <a
+                    href={`/api/user/${currentUser}/profile`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center"
+                  >
+                    <User size={14} className="mr-2 text-gray-400" />
+                    View Profile (API)
+                  </a>
+                  {/* BUG-12 fix: show 'coming soon' instead of silent no-op */}
+                  <button
+                    onClick={() => alert('Preferences panel coming soon!')}
+                    className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center"
+                  >
+                    <Settings size={14} className="mr-2 text-gray-400" />
                     Preferences
                   </button>
-                  <button className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+                  <button
+                    onClick={() => alert('Analytics dashboard coming soon!')}
+                    className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center"
+                  >
+                    <BarChart3 size={14} className="mr-2 text-gray-400" />
                     Analytics
                   </button>
                 </div>

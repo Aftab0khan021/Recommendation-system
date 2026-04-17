@@ -1,11 +1,11 @@
 import requests
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timezone  # BUG-4 fix: import timezone
 import time
 
 class RecommendationSystemTester:
-    def __init__(self, base_url="https://rec-system-hub.preview.emergentagent.com"):
+    def __init__(self, base_url="http://localhost:8000"):
         self.base_url = base_url
         self.api_url = f"{base_url}/api"
         self.tests_run = 0
@@ -124,7 +124,8 @@ class RecommendationSystemTester:
             "user_id": self.test_user,
             "item_id": "test_item_1",
             "type": "view",
-            "ts": datetime.utcnow().isoformat(),
+            # BUG-4 fix: use timezone-aware datetime instead of deprecated utcnow()
+            "ts": datetime.now(timezone.utc).isoformat(),
             "dwell_seconds": 30,
             "context": {"source": "test"}
         }

@@ -1,14 +1,31 @@
-from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 load_dotenv()
 SEED_ON_STARTUP = os.getenv("SEED_ON_STARTUP", "false").lower() == "true"
+_raw_admin_key = os.getenv("ADMIN_API_KEY", "")
+if not _raw_admin_key:
+    import warnings
+    warnings.warn(
+        "ADMIN_API_KEY is not set. The /admin/retrain endpoint is disabled until you set it.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
+ADMIN_API_KEY = _raw_admin_key or None
+
+# Read allowed origins from environment (BUG-2 fix)
+_cors_origins_raw = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000"
+)
+CORS_ORIGINS: list[str] = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+
 # Import our modules
 from models import (
     EventData, RecommendationRequest, RecommendationResponse, 
@@ -94,32 +111,23 @@ app = FastAPI(
 
 # Create API router
 api_router = APIRouter(prefix="/api")
-@app.on_event("startup")
-async def _attach_engine():
-    db = get_database()  # adapt to your project
-    eng = RecommendationEngine(db=db)
-    eng.initialize()     # if your class exposes such a method; otherwise build/train as you already do
-    app.state.engine = eng
-# CORS middleware
+
+# CORS middleware (BUG-2 fix: origins read from CORS_ORIGINS env var)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-engine = RecommendationEngine(...)
-# ... training/build steps ...
-logger.info("✅ Recommendation engine initialized")
 
-app.state.engine = engine
 # Health check endpoint
 @api_router.get("/health")
 async def health_check():
     """Health check endpoint for monitoring"""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc),
         "services": {
             "database": app_state['db_initialized'],
             "recommendation_engine": app_state['recommendation_engine_ready'],
@@ -171,17 +179,7 @@ async def log_event(event: EventData):
     except Exception as e:
         logger.error(f"Error logging event: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-@app.get("/api/recommendations")
-def get_recommendations(user: str = Query(...), limit: int = 12):
-    try:
-        eng = app.state.engine
-        items = eng.recommend(user_id=user, k=limit)
-        return {"items": items, "count": len(items), "user": user}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 # Recommendations endpoint
 @api_router.get("/recommend", response_model=RecommendationResponse)
 async def get_recommendations(
@@ -192,9 +190,8 @@ async def get_recommendations(
 ):
     """Get personalized recommendations for user"""
     try:
-        # Validate parameters
-        if n > 100:
-            n = 100  # Limit maximum recommendations
+        # Validate parameters (BUG-10 fix: clamp both min and max)
+        n = max(1, min(n, 100))
         
         # Validate content type
         if content_type and content_type not in [ct.value for ct in ContentType]:
@@ -235,12 +232,12 @@ async def get_recommendations(
             experiment_id='recommendation_algorithm_v1',
             event_type='recommendation_request',
             event_data={
-    'algorithm': algorithm,
-    'n_requested': n,
-    'content_type': content_type,
-    'n_returned': len(recommendations),
-    'recommended_item_ids': [r['item_id'] for r in recommendations]
-}
+                'algorithm': algorithm,
+                'n_requested': n,
+                'content_type': content_type,
+                'n_returned': len(recommendations),
+                'recommended_item_ids': [r['item_id'] for r in recommendations]
+            }
         )
         
         return RecommendationResponse(
@@ -290,8 +287,6 @@ async def search_items(
 async def ai_search(request: SearchRequest):
     """Advanced AI-powered natural language search"""
     try:
-        # Validate content type
-        from models import ContentType  # ensure imported
         # Force AI search type
         request.search_type = "ai"
         
@@ -334,14 +329,17 @@ async def get_user_profile(user_id: str):
         if not user_profile:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # Get recent interactions
+        # Get recent interactions (slice for display)
         interactions = await db.get_user_interactions(user_id, limit=20)
+        
+        # Get real total count from DB
+        total_interactions = await db.db.interactions.count_documents({"user_id": user_id})
         
         return {
             "user_id": user_id,
             "profile": user_profile,
             "recent_interactions": interactions,
-            "total_interactions": len(interactions)
+            "total_interactions": total_interactions
         }
         
     except HTTPException:
@@ -360,6 +358,9 @@ async def get_item_details(item_id: str):
         item_info = await db.db.items.find_one({"item_id": item_id})
         if not item_info:
             raise HTTPException(status_code=404, detail="Item not found")
+        
+        # Remove non-serializable _id field
+        item_info = {k: v for k, v in item_info.items() if k != '_id'}
         
         # Get similar items
         similar_items = await db.get_similar_items(item_id, limit=10)
@@ -380,6 +381,9 @@ async def get_item_details(item_id: str):
 async def get_popular_items(content_type: Optional[str] = None, limit: int = 20):
     """Get popular/trending items"""
     try:
+        # Cap limit to prevent large queries (Bug #13 fix)
+        limit = min(limit, 200)
+        
         db = await get_db_manager()
         popular_items = await db.get_popular_items(content_type, limit)
         
@@ -454,11 +458,16 @@ async def get_system_stats():
     try:
         db = await get_db_manager()
         stats = await db.get_system_stats()
-        
+
+        # BUG-15 fix: expose friendly status flags, not raw internal dict
         return {
             "statistics": stats,
-            "timestamp": datetime.utcnow(),
-            "system_status": app_state
+            "timestamp": datetime.now(timezone.utc),
+            "system_status": {
+                "database": app_state["db_initialized"],
+                "ml_model": app_state["recommendation_engine_ready"],
+                "data_ready": app_state["data_seeded"],
+            },
         }
         
     except Exception as e:
@@ -471,10 +480,19 @@ async def get_experiments():
     """Get all A/B test experiments"""
     return ab_test_manager.get_all_experiments()
 
-# Retrain model endpoint (for admin use)
+# Retrain model endpoint — admin only (Bug #12 fix)
 @api_router.post("/admin/retrain")
-async def retrain_model(background_tasks: BackgroundTasks):
+async def retrain_model(
+    background_tasks: BackgroundTasks,
+    x_admin_key: Optional[str] = Header(None)
+):
     """Retrain the recommendation model (admin endpoint)"""
+    # BUG-11 fix: if no key configured, endpoint is entirely disabled
+    if ADMIN_API_KEY is None:
+        raise HTTPException(status_code=503, detail="Admin endpoint is disabled: ADMIN_API_KEY not configured")
+    if x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: invalid admin API key")
+    
     try:
         async def retrain_task():
             rec_engine = await get_recommendation_engine()
@@ -486,7 +504,7 @@ async def retrain_model(background_tasks: BackgroundTasks):
         return {
             "status": "success",
             "message": "Model retraining started in background",
-            "timestamp": datetime.utcnow()
+            "timestamp": datetime.now(timezone.utc)
         }
         
     except Exception as e:

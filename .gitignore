@@ -77,4 +77,14 @@ agenthub/agents/youtube/db
 .cache/
 
 # Mobile development
-android-sdk/ 
+android-sdk/
+
+# BUG-17 fix: ignore orphaned root-level lock file and stale dev artifacts
+/package-lock.json
+/temp_repo/
+
+# MISSING-8: ignore persisted ML model files (large binaries belong in object storage)
+backend/models/
+
+# Backend secrets
+backend/.env

@@ -17,6 +17,8 @@ const SearchBar = ({
   const [isListening, setIsListening] = useState(false);
   const inputRef = useRef(null);
   const recognition = useRef(null);
+  // BUG-8 fix: keep a ref to latest handleSearch so voice search never uses a stale closure
+  const handleSearchRef = useRef(null);
 
   // Initialize speech recognition
   useEffect(() => {
@@ -30,7 +32,8 @@ const SearchBar = ({
         const transcript = event.results[0][0].transcript;
         setQuery(transcript);
         setIsListening(false);
-        handleSearch(transcript);
+        // BUG-8 fix: call via ref so we always get the latest handleSearch
+        handleSearchRef.current(transcript);
       };
 
       recognition.current.onerror = () => {
@@ -49,6 +52,8 @@ const SearchBar = ({
       setShowSuggestions(false);
     }
   };
+  // BUG-8 fix: always update the ref so voice-search callback always calls latest version
+  handleSearchRef.current = handleSearch;
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter') {
@@ -241,8 +246,12 @@ const SearchBar = ({
               </button>
             </div>
             
-            <div className="space-y-1">
-              {predefinedQueries.slice(0, 6).map((suggestion, index) => (
+          <div className="space-y-1">
+              {/* BUG-13 fix: show external suggestions first, then fill with predefined ones */}
+              {[...suggestions, ...predefinedQueries]
+                .filter((s, i, arr) => arr.indexOf(s) === i) // deduplicate
+                .slice(0, 6)
+                .map((suggestion, index) => (
                 <button
                   key={index}
                   onClick={() => {

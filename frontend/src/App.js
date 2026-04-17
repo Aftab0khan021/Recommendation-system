@@ -13,7 +13,7 @@ import LoadingSpinner from './components/LoadingSpinner';
 // Icons
 import { AlertCircle, RefreshCw, Search, Sparkles, TrendingUp, Filter } from 'lucide-react';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://127.0.0.1:8000';
 const API = `${BACKEND_URL}/api`;
 
 const App = () => {
@@ -33,9 +33,13 @@ const App = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('recommendations'); // 'recommendations' or 'search'
   const [lastSearchQuery, setLastSearchQuery] = useState('');
+  // Bug #18 fix: track page offset for real "Load More" pagination
+  const [recPage, setRecPage] = useState(1);
+  const [searchPage, setSearchPage] = useState(1);
+  const PAGE_SIZE = 20;
 
-  // Fetch recommendations
-  const fetchRecommendations = useCallback(async () => {
+  // Fetch recommendations — BUG-14 fix: only fetch the page slice needed, not all pages
+  const fetchRecommendations = useCallback(async (page = 1, append = false) => {
     if (!currentUser.trim()) return;
 
     setLoading(true);
@@ -44,7 +48,7 @@ const App = () => {
     try {
       const params = new URLSearchParams({
         user_id: currentUser,
-        n: '20'
+        n: String(PAGE_SIZE)  // BUG-14 fix: always request only one page worth
       });
       
       if (contentTypeFilter) {
@@ -52,31 +56,36 @@ const App = () => {
       }
 
       const response = await axios.get(`${API}/recommend?${params}`);
-      setRecommendations(response.data.recommendations || []);
+      const incoming = response.data.recommendations || [];
+      // On fresh load replace list; on load-more append the new page
+      setRecommendations(prev => append ? [...prev, ...incoming] : incoming);
       setAlgorithm(response.data.algorithm);
     } catch (error) {
       console.error('Error fetching recommendations:', error);
       setError('Failed to fetch recommendations. Please try again.');
-      setRecommendations([]);
+      if (!append) setRecommendations([]);
     } finally {
       setLoading(false);
     }
-  }, [currentUser, contentTypeFilter]);
+  }, [currentUser, contentTypeFilter, PAGE_SIZE]);
 
-  // Search functionality
-  const handleSearch = async (query) => {
+  // Search functionality — BUG-14 fix: request only one page's worth, don't over-fetch
+  const handleSearch = async (query, page = 1, append = false) => {
     if (!query.trim()) return;
 
     setSearchLoading(true);
     setError(null);
-    setLastSearchQuery(query);
-    setActiveTab('search');
+    if (!append) {
+      setLastSearchQuery(query);
+      setActiveTab('search');
+      setSearchPage(1);
+    }
     
     try {
       const params = new URLSearchParams({
         q: query,
         search_type: searchType,
-        limit: '20'
+        limit: String(PAGE_SIZE)  // BUG-14 fix: always fetch exactly one page
       });
       
       if (currentUser) {
@@ -88,11 +97,13 @@ const App = () => {
       }
 
       const response = await axios.get(`${API}/search?${params}`);
-      setSearchResults(response.data.results || []);
+      const incoming = response.data.results || [];
+      // On fresh load replace; on load-more append
+      setSearchResults(prev => append ? [...prev, ...incoming] : incoming);
     } catch (error) {
       console.error('Error searching:', error);
       setError('Search failed. Please try again.');
-      setSearchResults([]);
+      if (!append) setSearchResults([]);
     } finally {
       setSearchLoading(false);
     }
@@ -173,20 +184,36 @@ const App = () => {
     setIsModalOpen(true);
   };
 
-  // Handle refresh
+  // Handle refresh — resets to page 1
   const handleRefresh = () => {
+    setRecPage(1);
+    setSearchPage(1);
     if (activeTab === 'recommendations') {
-      fetchRecommendations();
+      fetchRecommendations(1, false);
     } else if (lastSearchQuery) {
-      handleSearch(lastSearchQuery);
+      handleSearch(lastSearchQuery, 1, false);
     }
     fetchStats();
     fetchAbTestInfo();
   };
 
-  // Load data on component mount and user/filter change
+  // Bug #18 fix: real load-more — increments page and appends
+  const handleLoadMore = () => {
+    if (activeTab === 'recommendations') {
+      const nextPage = recPage + 1;
+      setRecPage(nextPage);
+      fetchRecommendations(nextPage, true);
+    } else if (lastSearchQuery) {
+      const nextPage = searchPage + 1;
+      setSearchPage(nextPage);
+      handleSearch(lastSearchQuery, nextPage, true);
+    }
+  };
+
+  // Load data on component mount and user/filter change (reset pagination)
   useEffect(() => {
-    fetchRecommendations();
+    setRecPage(1);
+    fetchRecommendations(1, false);
     fetchAbTestInfo();
   }, [fetchRecommendations, fetchAbTestInfo]);
 
@@ -328,7 +355,8 @@ const App = () => {
             
             {activeTab === 'search' && lastSearchQuery && (
               <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full font-medium">
-                "{lastSearchQuery}"
+                {/* Bug #24 fix: use JSX expression, not literal quote characters */}
+                &ldquo;{lastSearchQuery}&rdquo;
               </span>
             )}
             
@@ -401,14 +429,15 @@ const App = () => {
           </div>
         )}
 
-        {/* Load More Button */}
+        {/* Load More Button — Bug #18 fix: appends next page instead of refreshing */}
         {currentResults.length > 0 && (
           <div className="text-center py-8">
             <button
-              onClick={handleRefresh}
-              className="bg-white hover:bg-gray-50 text-gray-700 px-8 py-3 rounded-xl shadow-md hover:shadow-lg transition-all duration-200 border border-gray-200 font-medium transform hover:scale-105"
+              onClick={handleLoadMore}
+              disabled={currentLoading}
+              className="bg-white hover:bg-gray-50 text-gray-700 px-8 py-3 rounded-xl shadow-md hover:shadow-lg transition-all duration-200 border border-gray-200 font-medium transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <RefreshCw size={16} className="inline mr-2" />
+              <RefreshCw size={16} className={`inline mr-2 ${currentLoading ? 'animate-spin' : ''}`} />
               Load More {activeTab === 'search' ? 'Results' : 'Recommendations'}
             </button>
           </div>
