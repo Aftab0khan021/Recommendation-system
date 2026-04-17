@@ -24,6 +24,9 @@ joblib>=1.3.0          # NEW-2 fix: model persistence for XGBoost save/load
 
 # Utilities
 requests>=2.31.0
+httpx>=0.27.0          # async HTTP client for real-data API fetchers
+aiofiles>=23.2.0       # async file I/O for MovieLens dataset caching
+rapidfuzz>=3.6.0       # fast fuzzy string matching for entity resolution
 Faker>=24.0.0
 tzdata>=2024.2
 

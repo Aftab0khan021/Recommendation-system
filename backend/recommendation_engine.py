@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 # Lock to guard model swap during retrain (Bug #20 fix)
 _model_lock = asyncio.Lock()
 
+
+def _norm_title(title: str) -> str:
+    """Normalise a title for duplicate detection (lowercase, no articles, no punctuation)."""
+    import re
+    t = title.lower().strip()
+    t = re.sub(r'^(the|a|an)\s+', '', t)
+    t = re.sub(r'[^\w\s]', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
 # Paths for model persistence (MISSING-8 fix)
 _MODEL_DIR = os.getenv("MODEL_DIR", "./models")
 _MODEL_PATH = os.path.join(_MODEL_DIR, "xgb_model.joblib")
@@ -440,13 +449,26 @@ class RecommendationEngine:
     # ------------------------------------------------------------------
     # Candidate generation
     # ------------------------------------------------------------------
-    async def generate_candidates(self, user_id: str, content_type: Optional[str] = None, n_candidates: int = 500) -> List[str]:
-        """Generate candidate items using multiple strategies"""
+    async def generate_candidates(
+        self,
+        user_id: str,
+        content_type: Optional[str] = None,
+        n_candidates: int = 500,
+        exclude_ids: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Generate candidate items using multiple strategies.
+        exclude_ids: item_ids already shown to this user in the current session.
+        """
         candidates: set = set()
+        # All items the user must NOT see again
+        seen_items: set = set(exclude_ids or [])
 
         try:
-            user_interactions = await self.get_user_recent_items(user_id, limit=10)
-            for item_id in user_interactions:
+            # Full interaction history (not just 10) to avoid repeat recommendations
+            user_interactions = await self.get_user_recent_items(user_id, limit=500)
+            seen_items.update(user_interactions)
+
+            for item_id in user_interactions[:10]:
                 similar_items = self.co_visitation_graph.get(item_id, {})
                 candidates.update(list(similar_items.keys())[:20])
 
@@ -459,7 +481,7 @@ class RecommendationEngine:
                     similar_items_list = await self.get_content_similar_items(item_id, limit=50)
                     candidates.update(similar_items_list)
 
-            seen_items = set(user_interactions)
+            # Remove everything the user has seen OR was already shown this session
             candidates = candidates - seen_items
 
             # Bug #14 fix: sort for deterministic selection before slicing
@@ -473,7 +495,8 @@ class RecommendationEngine:
                     if item['item_id'] not in candidates and item['item_id'] not in seen_items:
                         candidate_list.append(item['item_id'])
 
-            logger.info(f"Generated {len(candidate_list)} candidates for user {user_id}")
+            logger.info(f"Generated {len(candidate_list)} candidates for user {user_id} "
+                        f"(excluded {len(seen_items)} seen/excluded ids)")
             return candidate_list
 
         except Exception as e:
@@ -609,16 +632,43 @@ class RecommendationEngine:
             logger.error(f"Error in popularity ranking: {e}")
             return []
 
-    async def get_recommendations(self, user_id: str, n: int = 10, content_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Main recommendation function"""
+    async def get_recommendations(
+        self,
+        user_id: str,
+        n: int = 10,
+        content_type: Optional[str] = None,
+        exclude_ids: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return n personalised recommendations.
+
+        exclude_ids: item_ids already shown to the user in the current page/session.
+                     Pass these from the frontend so the same item never appears twice
+                     even across "Load More" clicks.
+        """
         try:
-            candidates = await self.generate_candidates(user_id, content_type, n_candidates=500)
+            candidates = await self.generate_candidates(
+                user_id, content_type, n_candidates=500, exclude_ids=exclude_ids
+            )
             ranked_items = await self.rank_candidates(user_id, candidates)
 
             if content_type:
-                ranked_items = [item for item in ranked_items if item['content_type'] == content_type]
+                ranked_items = [item for item in ranked_items
+                                if item['content_type'] == content_type]
 
-            return ranked_items[:n]
+            # Final in-memory title dedup: never return two items with the
+            # same normalised title in the same response batch
+            seen_titles: set = set()
+            deduped: List[Dict[str, Any]] = []
+            for item in ranked_items:
+                norm = _norm_title(item.get('title', ''))
+                if norm not in seen_titles:
+                    seen_titles.add(norm)
+                    deduped.append(item)
+                if len(deduped) >= n:
+                    break
+
+            return deduped
 
         except Exception as e:
             logger.error(f"Error getting recommendations: {e}")

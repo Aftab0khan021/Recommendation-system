@@ -9,6 +9,10 @@ from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 load_dotenv()
 SEED_ON_STARTUP = os.getenv("SEED_ON_STARTUP", "false").lower() == "true"
+# Switch between synthetic (Faker) data and real data from APIs + MovieLens
+USE_REAL_DATA = os.getenv("USE_REAL_DATA", "false").lower() == "true"
+# How many NEW real-user interactions trigger a background model retrain
+RETRAIN_THRESHOLD = int(os.getenv("RETRAIN_THRESHOLD", "100"))
 _raw_admin_key = os.getenv("ADMIN_API_KEY", "")
 if not _raw_admin_key:
     import warnings
@@ -49,7 +53,11 @@ logger = logging.getLogger(__name__)
 app_state = {
     'db_initialized': False,
     'recommendation_engine_ready': False,
-    'data_seeded': False
+    'data_seeded': False,
+    # Auto-retrain: incremented on every real user interaction
+    'interaction_counter': 0,
+    # True while a background retrain is in progress
+    'retraining': False,
 }
 
 @asynccontextmanager
@@ -67,11 +75,16 @@ async def lifespan(app: FastAPI):
         user_count = await db.db.users.count_documents({})
         item_count = await db.db.items.count_documents({})
         if SEED_ON_STARTUP and (user_count == 0 or item_count == 0):
-            logger.info("Seeding database (SEED_ON_STARTUP=true)...")
-            seeder = DataSeeder()
-            await seeder.seed_all_data(users_count=500, items_count=2000, interactions_count=20000)
+            if USE_REAL_DATA:
+                logger.info("Seeding with REAL data (USE_REAL_DATA=true)...")
+                seeder = DataSeeder()
+                await seeder.seed_real_data()
+            else:
+                logger.info("Seeding with synthetic data (SEED_ON_STARTUP=true)...")
+                seeder = DataSeeder()
+                await seeder.seed_all_data(users_count=500, items_count=2000, interactions_count=20000)
             app_state['data_seeded'] = True
-            logger.info("✅ Database seeded with sample data")
+            logger.info("✅ Database seeded")
         else:
             if user_count == 0 or item_count == 0:
                 logger.info("⏭️ Skipping seeding (SEED_ON_STARTUP=false). DB is empty; seed manually for prod.")
@@ -137,8 +150,8 @@ async def health_check():
 
 # Event logging endpoint
 @api_router.post("/event")
-async def log_event(event: EventData):
-    """Log user interaction events"""
+async def log_event(event: EventData, background_tasks: BackgroundTasks):
+    """Log user interaction events — counts interactions and triggers auto-retrain."""
     try:
         # Create interaction object
         interaction = Interaction(
@@ -169,6 +182,16 @@ async def log_event(event: EventData):
                 'context': event.context
             }
         )
+
+        # ── Auto-retrain: count real interactions and trigger retrain ─────────
+        app_state['interaction_counter'] += 1
+        if (app_state['interaction_counter'] >= RETRAIN_THRESHOLD
+                and not app_state['retraining']):
+            app_state['interaction_counter'] = 0
+            background_tasks.add_task(_retrain_background)
+            logger.info(
+                f"Auto-retrain triggered after {RETRAIN_THRESHOLD} new interactions"
+            )
         
         return {
             "status": "success",
@@ -180,39 +203,87 @@ async def log_event(event: EventData):
         logger.error(f"Error logging event: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+async def _retrain_background():
+    """Background task: retrain the recommendation model non-blocking."""
+    if app_state['retraining']:
+        logger.info("Retrain already in progress — skipping.")
+        return
+    app_state['retraining'] = True
+    try:
+        logger.info("[Auto-Retrain] Starting background model retrain...")
+        rec_engine = await get_recommendation_engine()
+        await rec_engine.train_model()
+        logger.info("[Auto-Retrain] Model retrained and swapped successfully.")
+    except Exception as exc:
+        logger.error(f"[Auto-Retrain] Failed: {exc}")
+    finally:
+        app_state['retraining'] = False
+
+
 # Recommendations endpoint
 @api_router.get("/recommend", response_model=RecommendationResponse)
 async def get_recommendations(
     user_id: str,
     n: int = 10,
     content_type: Optional[str] = None,
-    exclude_seen: bool = True
+    exclude_seen: bool = True,
+    exclude_ids: Optional[str] = None,   # comma-separated item_ids already shown this session
 ):
-    """Get personalized recommendations for user"""
+    """
+    Get personalized recommendations for a user.
+
+    exclude_ids: comma-separated list of item_ids the frontend has already shown
+                 in the current session (e.g. "tmdb_movie_155,rawg_game_12").
+                 The endpoint will NEVER return any of these items, even via
+                 Load More pagination.
+    """
     try:
         # Validate parameters (BUG-10 fix: clamp both min and max)
         n = max(1, min(n, 100))
-        
+
         # Validate content type
         if content_type and content_type not in [ct.value for ct in ContentType]:
             raise HTTPException(status_code=400, detail="Invalid content type")
-        
+
+        # Parse exclude_ids
+        excluded_set: List[str] = (
+            [eid.strip() for eid in exclude_ids.split(",") if eid.strip()]
+            if exclude_ids else []
+        )
+
         # Get A/B test assignment
         should_use_ml = ab_test_manager.should_use_xgboost(user_id)
         algorithm = "xgboost_ml" if should_use_ml else "popularity_based"
-        
+
         # Get recommendations
         rec_engine = await get_recommendation_engine()
-        
+
         if should_use_ml and rec_engine.is_trained:
-            recommendations = await rec_engine.get_recommendations(user_id, n, content_type)
+            recommendations = await rec_engine.get_recommendations(
+                user_id, n, content_type, exclude_ids=excluded_set
+            )
         else:
-            # Fallback to popularity-based
+            # Fallback: popularity-based, filtered + title-deduped
             db = await get_db_manager()
-            popular_items = await db.get_popular_items(content_type, limit=n)
+            # Fetch more than n so we have headroom after filtering
+            popular_items = await db.get_popular_items(content_type, limit=n * 3)
             recommendations = []
-            
+            seen_titles: set = set()
+            excluded_set_fast: set = set(excluded_set)
+
             for item in popular_items:
+                if item['item_id'] in excluded_set_fast:
+                    continue                                  # skip already-shown
+                # Normalised title dedup
+                import re
+                norm = re.sub(r'\s+', ' ',
+                    re.sub(r'[^\w\s]', ' ',
+                    re.sub(r'^(the|a|an)\s+', '',
+                    item['title'].lower().strip()))).strip()
+                if norm in seen_titles:
+                    continue                                  # skip same-title
+                seen_titles.add(norm)
                 recommendations.append({
                     'item_id': item['item_id'],
                     'title': item['title'],
@@ -225,7 +296,9 @@ async def get_recommendations(
                     'ml_score': 0.0,
                     'tags': item.get('tags', [])
                 })
-        
+                if len(recommendations) >= n:
+                    break
+
         # Log recommendation request
         ab_test_manager.log_experiment_event(
             user_id=user_id,
@@ -236,15 +309,16 @@ async def get_recommendations(
                 'n_requested': n,
                 'content_type': content_type,
                 'n_returned': len(recommendations),
+                'excluded_count': len(excluded_set),
                 'recommended_item_ids': [r['item_id'] for r in recommendations]
             }
         )
-        
+
         return RecommendationResponse(
             recommendations=recommendations,
             algorithm=algorithm
         )
-        
+
     except Exception as e:
         logger.error(f"Error getting recommendations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -511,7 +585,56 @@ async def retrain_model(
         logger.error(f"Error starting model retrain: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Include the API router
+# ── Retrain status endpoint ───────────────────────────────────────────────────
+@api_router.get("/retrain/status")
+async def retrain_status():
+    """Check whether a background model retrain is currently in progress."""
+    return {
+        "retraining":            app_state['retraining'],
+        "interactions_since_last_retrain": app_state['interaction_counter'],
+        "retrain_threshold":     RETRAIN_THRESHOLD,
+        "progress_pct": round(
+            min(app_state['interaction_counter'] / RETRAIN_THRESHOLD * 100, 100), 1
+        ),
+    }
+
+
+# ── Manual seed endpoint (triggers real or synthetic seeding) ─────────────────
+@api_router.post("/seed")
+async def seed_database(
+    background_tasks: BackgroundTasks,
+    real: bool = False,
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
+):
+    """
+    Manually trigger database seeding.
+    - real=false → synthetic Faker data (fast, ~5 sec)
+    - real=true  → real APIs + MovieLens dataset (slower, ~2-5 min)
+    Requires X-Admin-Key header.
+    """
+    if not ADMIN_API_KEY or x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing admin key")
+
+    async def _seed():
+        seeder = DataSeeder()
+        if real:
+            logger.info("[Seed] Starting real data seeding...")
+            await seeder.seed_real_data()
+        else:
+            logger.info("[Seed] Starting synthetic data seeding...")
+            await seeder.seed_all_data()
+
+    background_tasks.add_task(_seed)
+    return {
+        "status": "started",
+        "mode": "real" if real else "synthetic",
+        "message": (
+            "Real data seeding started — check logs for progress (~2-5 min)"
+            if real else
+            "Synthetic seeding started — should complete in ~5 seconds"
+        ),
+    }
+
 app.include_router(api_router)
 
 # Root endpoint

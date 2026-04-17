@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from faker import Faker
 import random
 from typing import List
@@ -257,7 +258,7 @@ class DataSeeder:
             return round(random.uniform(2.0, 5.0), 1)
 
     async def seed_all_data(self, users_count: int = 500, items_count: int = 2000, interactions_count: int = 20000):
-        """Seed all data in the database"""
+        """Seed all data in the database using synthetic (Faker) data."""
         try:
             db = await get_db_manager()
 
@@ -268,7 +269,7 @@ class DataSeeder:
                 logger.info(f"Data already exists: {existing_users} users, {existing_items} items")
                 return
 
-            logger.info("Starting data seeding process...")
+            logger.info("Starting synthetic data seeding process...")
 
             # Generate and bulk-insert users
             users = await self.generate_users(users_count)
@@ -288,8 +289,208 @@ class DataSeeder:
             interactions = await self.generate_interactions(users, items, interactions_count)
             await db.bulk_insert_interactions(interactions)
 
-            logger.info("Data seeding completed successfully!")
+            logger.info("Synthetic data seeding completed successfully!")
 
         except Exception as e:
             logger.error(f"Error seeding data: {e}")
+            raise
+
+    async def seed_real_data(self, max_ml_interactions: int = 200_000):
+        """
+        4-step intelligent seeding pipeline for ALL content types:
+
+        STEP 1  Fetch "rich" items from APIs  (real poster, description, rating)
+        STEP 2  Load "ratings" datasets       (real human interaction history)
+        STEP 3  MATCH & MERGE via EntityResolver:
+                  Movies  : links.csv  exact TMDB-ID map  (ML-25M)
+                            title+year fuzzy match         (ML-1M / fallback)
+                  Books   : title fuzzy match  (Open Library ↔ Book-Crossings)
+                  Games   : title fuzzy match  (RAWG ↔ Steam)
+                  Music   : artist fuzzy match (Spotify ↔ Last.fm)
+                  Articles: title dedup        (NewsData ↔ NewsAPI)
+                  Videos  : title dedup        (TMDB TV ↔ YouTube)
+        STEP 4  Insert unified items + remapped interactions → XGBoost trains
+                on API-quality metadata + dataset-scale real interactions
+        """
+        try:
+            db = await get_db_manager()
+            existing_users = await db.db.users.count_documents({})
+            existing_items = await db.db.items.count_documents({})
+            if existing_users > 0 and existing_items > 0:
+                logger.info(
+                    f"Already seeded ({existing_users} users, "
+                    f"{existing_items} items) — skipping."
+                )
+                return
+
+            load_extra = os.getenv("LOAD_EXTRA_DATASETS", "true").lower() == "true"
+            ml_size    = os.getenv("ML_DATASET_SIZE", "1m").lower()
+
+            # ── STEP 1: Fetch rich API items grouped by source ────────────────
+            logger.info("=" * 65)
+            logger.info("STEP 1 — Fetching rich metadata from 10 APIs in parallel")
+            logger.info("=" * 65)
+            from real_data_fetcher import RealDataFetcher
+            async with RealDataFetcher() as fetcher:
+                sources = await fetcher.fetch_by_source()
+
+            # ── STEP 2: Load datasets (auto-downloaded, cached) ───────────────
+            logger.info("=" * 65)
+            logger.info("STEP 2 — Loading free datasets (auto-download + cache)")
+            logger.info("=" * 65)
+            from dataset_loader import (
+                BookCrossingsLoader, SteamLoader,
+                AmazonProductLoader, MovieLens25MLoader,
+            )
+            from movielens_loader import MovieLensLoader
+
+            # MovieLens: 1M (fast) or 25M (rich, exact TMDB IDs)
+            ml_links: dict = {}
+            if ml_size == "25m":
+                logger.info("Loading MovieLens 25M (links.csv → exact TMDB mapping)…")
+                ml_users, ml_items, ml_interactions, ml_links = \
+                    await MovieLens25MLoader().load(max_interactions=max_ml_interactions)
+                logger.info(f"ML-25M links loaded: {len(ml_links):,} TMDB ID mappings")
+            else:
+                logger.info("Loading MovieLens 1M (title+year fuzzy matching)…")
+                ml_users, ml_items, ml_interactions = \
+                    await MovieLensLoader().load(max_interactions=max_ml_interactions)
+
+            bx_items, bx_users, bx_interactions = [], [], []
+            steam_items: list = []
+            amz_items, amz_interactions = [], []
+
+            if load_extra:
+                logger.info("Loading Book-Crossings (books + ratings)…")
+                bx_items, bx_users, bx_interactions = await BookCrossingsLoader().load(
+                    max_items=5_000, max_interactions=100_000,
+                )
+                logger.info("Loading Steam games metadata…")
+                steam_items = await SteamLoader().load(max_items=2_000)
+                logger.info("Loading Amazon Electronics metadata + ratings…")
+                amz_items, amz_interactions = await AmazonProductLoader().load(
+                    max_items=2_000, max_interactions=50_000,
+                )
+
+            # ── STEP 3: MATCH & MERGE via EntityResolver ──────────────────────
+            logger.info("=" * 65)
+            logger.info("STEP 3 — Entity Resolution: match + merge across all sources")
+            logger.info("=" * 65)
+            from entity_resolver import EntityResolver
+            resolver = EntityResolver()
+
+            # 3a. MOVIES: TMDB (rich) + MovieLens (ratings) → unified
+            logger.info("  [3a] Movies: TMDB ↔ MovieLens …")
+            unified_movies, remapped_ml_ints = resolver.resolve_movies(
+                tmdb_items=sources["tmdb_movies"],
+                ml_items=ml_items,
+                ml_interactions=ml_interactions,
+                ml_links=ml_links or None,
+            )
+
+            # 3b. BOOKS: Open Library (rich) + Book-Crossings (ratings) → unified
+            logger.info("  [3b] Books: Open Library ↔ Book-Crossings …")
+            unified_books, remapped_bx_ints = resolver.resolve_books(
+                openlibrary_items=sources["openlibrary"],
+                bx_items=bx_items,
+                bx_interactions=bx_interactions,
+            )
+
+            # 3c. GAMES: RAWG (rich) + Steam (additional) → unified
+            logger.info("  [3c] Games: RAWG ↔ Steam …")
+            unified_games = resolver.resolve_games(
+                rawg_items=sources["rawg"],
+                steam_items=steam_items,
+            )
+
+            # 3d. MUSIC: Spotify (rich) + Last.fm (listener counts) → unified
+            logger.info("  [3d] Music: Spotify ↔ Last.fm …")
+            unified_music = resolver.resolve_music(
+                spotify_items=sources["spotify"],
+                lastfm_items=sources["lastfm"],
+            )
+
+            # 3e. ARTICLES: NewsData + NewsAPI → deduplicated
+            logger.info("  [3e] Articles: NewsData ↔ NewsAPI deduplication …")
+            unified_articles = resolver.deduplicate_articles(
+                sources["newsdata"],
+                sources["newsapi"],
+            )
+
+            # 3f. VIDEOS: TMDB TV + YouTube → deduplicated
+            logger.info("  [3f] Videos: TMDB TV ↔ YouTube deduplication …")
+            unified_videos = resolver.deduplicate_videos(
+                tmdb_tv_items=sources["tmdb_tv"],
+                youtube_items=sources["youtube"],
+            )
+
+            # 3g. PRODUCTS: Open Food Facts + Amazon Electronics (no dedup needed)
+            unified_products = sources["food"] + amz_items
+
+            resolver.log_summary()
+
+            # ── Faker fallback for any content type still < 50 items ──────────
+            from collections import Counter
+            from models import ContentType as CT
+            all_resolved = (
+                unified_movies + unified_books + unified_games
+                + unified_music + unified_articles + unified_videos
+                + unified_products
+            )
+            type_counts = Counter(item.content_type.value for item in all_resolved)
+            logger.info(f"Resolved item counts by type: {dict(type_counts)}")
+
+            fallback_items = []
+            for ct in CT:
+                if type_counts.get(ct.value, 0) < 50:
+                    needed = 50 - type_counts.get(ct.value, 0)
+                    logger.info(f"Generating {needed} synthetic fallback: {ct.value}")
+                    batch = await self.generate_items(needed)
+                    for item in batch:
+                        item.content_type = ct
+                        item.item_id = f"fake_{ct.value}_{item.item_id}"
+                    fallback_items.extend(batch)
+
+            # ── STEP 4: INSERT into MongoDB ───────────────────────────────────
+            logger.info("=" * 65)
+            logger.info("STEP 4 — Inserting unified catalogue into MongoDB")
+            logger.info("=" * 65)
+
+            # Insert all unified items
+            all_items = all_resolved + fallback_items
+            if all_items:
+                await db.db.items.insert_many(
+                    [i.model_dump() for i in all_items], ordered=False
+                )
+            logger.info(f"Unified items inserted: {len(all_items):,}")
+
+            # Insert unmatched MovieLens movie items (those with no TMDB match)
+            # They already appear in unified_movies (resolve_movies keeps them)
+
+            # Insert users
+            all_users = ml_users + bx_users
+            if all_users:
+                await db.db.users.insert_many(
+                    [u.model_dump() for u in all_users], ordered=False
+                )
+            logger.info(f"Users inserted: {len(all_users):,}")
+
+            # Insert ALL remapped interactions
+            all_interactions = remapped_ml_ints + remapped_bx_ints + amz_interactions
+            await db.bulk_insert_interactions(all_interactions)
+
+            # ── Final summary ─────────────────────────────────────────────────
+            logger.info("=" * 65)
+            logger.info("REAL DATA SEEDING — COMPLETE!")
+            final_users = await db.db.users.count_documents({})
+            final_items = await db.db.items.count_documents({})
+            final_ints  = await db.db.interactions.count_documents({})
+            logger.info(f"  Items        : {final_items:,}")
+            logger.info(f"  Users        : {final_users:,}")
+            logger.info(f"  Interactions : {final_ints:,}")
+            logger.info("=" * 65)
+            logger.info("XGBoost trains on TMDB-quality items + ML-scale interactions")
+
+        except Exception as exc:
+            logger.error(f"Error during real data seeding: {exc}")
             raise
