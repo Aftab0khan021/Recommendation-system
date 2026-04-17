@@ -194,12 +194,12 @@ class ABTestManager:
                 self._event_buffer[experiment_id] = buf[-1000:]
 
             # Persist to MongoDB asynchronously without blocking the caller
+            # HIGH-1 fix: get_event_loop() is deprecated in 3.10+, raises in 3.12+
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(self._persist_event(event))
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_event(event))
             except RuntimeError:
-                pass  # No running event loop at module import time — skip persist
+                pass  # No running event loop — skip async persist
 
         except Exception as e:
             logger.error(f"Error logging experiment event: {e}")

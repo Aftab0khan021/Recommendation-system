@@ -587,7 +587,7 @@ class RecommendationEngine:
                     [("view_count", -1), ("rating", -1)]
                 ).limit(50)
 
-            items = await cursor.to_list(length=max(len(candidate_ids), 1))  # BUG-9 fix: don't hard-cap at 50
+            items = await cursor.to_list(length=len(candidate_ids) if candidate_ids else 50)  # NEW-6 fix
 
             return [
                 {

@@ -280,7 +280,7 @@ class DatabaseManager:
                         "as": "item_info"
                     }
                 },
-                {"$unwind": "$item_info"},
+                {"$unwind": {"path": "$item_info", "preserveNullAndEmptyArrays": True}},  # NEW-1 fix
                 {
                     "$group": {
                         "_id": "$user_id",
@@ -348,7 +348,7 @@ class DatabaseManager:
                         "as": "item_info"
                     }
                 },
-                {"$unwind": "$item_info"},
+                {"$unwind": {"path": "$item_info", "preserveNullAndEmptyArrays": True}},  # HIGH-2 fix
                 {
                     "$group": {
                         "_id": "$item_info.category",

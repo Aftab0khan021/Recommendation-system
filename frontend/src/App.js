@@ -36,6 +36,11 @@ const App = () => {
   // Bug #18 fix: track page offset for real "Load More" pagination
   const [recPage, setRecPage] = useState(1);
   const [searchPage, setSearchPage] = useState(1);
+  // NEW-7 fix: track whether more pages exist so Load More hides when exhausted
+  const [hasMoreRecs, setHasMoreRecs] = useState(true);
+  const [hasMoreSearch, setHasMoreSearch] = useState(true);
+  // NEW-4 fix: React-managed notifications instead of raw document.createElement
+  const [notifications, setNotifications] = useState([]);
   const PAGE_SIZE = 20;
 
   // Fetch recommendations — BUG-14 fix: only fetch the page slice needed, not all pages
@@ -59,6 +64,8 @@ const App = () => {
       const incoming = response.data.recommendations || [];
       // On fresh load replace list; on load-more append the new page
       setRecommendations(prev => append ? [...prev, ...incoming] : incoming);
+      // NEW-7 fix: hide Load More if we got fewer items than requested
+      setHasMoreRecs(incoming.length >= PAGE_SIZE);
       setAlgorithm(response.data.algorithm);
     } catch (error) {
       console.error('Error fetching recommendations:', error);
@@ -100,6 +107,8 @@ const App = () => {
       const incoming = response.data.results || [];
       // On fresh load replace; on load-more append
       setSearchResults(prev => append ? [...prev, ...incoming] : incoming);
+      // NEW-7 fix: hide Load More if we got fewer items than requested
+      setHasMoreSearch(incoming.length >= PAGE_SIZE);
     } catch (error) {
       console.error('Error searching:', error);
       setError('Search failed. Please try again.');
@@ -122,9 +131,10 @@ const App = () => {
   // Fetch A/B test information
   const fetchAbTestInfo = useCallback(async () => {
     if (!currentUser.trim()) return;
-
     try {
-      const response = await axios.get(`${API}/ab/arm?user_id=${currentUser}`);
+      // NEW-5 fix: use URLSearchParams instead of string interpolation
+      const params = new URLSearchParams({ user_id: currentUser });
+      const response = await axios.get(`${API}/ab/arm?${params}`);
       setAbTestInfo(response.data);
     } catch (error) {
       console.error('Error fetching A/B test info:', error);
@@ -138,45 +148,29 @@ const App = () => {
         user_id: currentUser,
         item_id: itemId,
         type: interactionType,
+        // NEW-3 fix: send client-side timestamp so logged time reflects actual interaction
+        ts: new Date().toISOString(),
         dwell_seconds: context.view_duration || 0,
         context: context
       };
 
       await axios.post(`${API}/event`, eventData);
       console.log(`Logged ${interactionType} interaction for item ${itemId}`);
-      
-      // Show enhanced notification
       showNotification(`${interactionType.charAt(0).toUpperCase() + interactionType.slice(1)} recorded! 🎉`, 'success');
-      
     } catch (error) {
       console.error('Error logging interaction:', error);
       showNotification('Error logging interaction', 'error');
     }
   };
 
-  // Enhanced notification system
-  const showNotification = (message, type = 'success') => {
-    const notification = document.createElement('div');
-    const bgColor = type === 'success' ? 'bg-green-500' : 'bg-red-500';
-    notification.className = `fixed top-4 right-4 ${bgColor} text-white px-6 py-3 rounded-lg shadow-lg z-50 transform translate-x-full transition-transform duration-300`;
-    notification.textContent = message;
-    document.body.appendChild(notification);
-    
-    // Animate in
+  // NEW-4 fix: React state-based notifications — no raw document.createElement
+  const showNotification = useCallback((message, type = 'success') => {
+    const id = Date.now();
+    setNotifications(prev => [...prev, { id, message, type }]);
     setTimeout(() => {
-      notification.classList.remove('translate-x-full');
-    }, 100);
-    
-    // Remove after delay
-    setTimeout(() => {
-      notification.classList.add('translate-x-full');
-      setTimeout(() => {
-        if (document.body.contains(notification)) {
-          document.body.removeChild(notification);
-        }
-      }, 300);
+      setNotifications(prev => prev.filter(n => n.id !== id));
     }, 3000);
-  };
+  }, []);
 
   // Handle item click - open modal
   const handleItemClick = (item) => {
@@ -429,8 +423,8 @@ const App = () => {
           </div>
         )}
 
-        {/* Load More Button — Bug #18 fix: appends next page instead of refreshing */}
-        {currentResults.length > 0 && (
+        {/* NEW-7 fix: only show Load More when there are more items to fetch */}
+        {currentResults.length > 0 && (activeTab === 'recommendations' ? hasMoreRecs : hasMoreSearch) && (
           <div className="text-center py-8">
             <button
               onClick={handleLoadMore}
@@ -452,7 +446,21 @@ const App = () => {
         onInteraction={logInteraction}
       />
 
-      {/* Enhanced Footer */}
+      {/* NEW-4 fix: React-managed toast notifications */}
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+        {notifications.map(n => (
+          <div
+            key={n.id}
+            className={`px-6 py-3 rounded-lg shadow-lg text-white font-medium transition-all duration-300 pointer-events-auto ${
+              n.type === 'success' ? 'bg-green-500' : 'bg-red-500'
+            }`}
+          >
+            {n.message}
+          </div>
+        ))}
+      </div>
+
+      {/* LOW-2 fix: unified product name to RecommendAI in footer */}
       <footer className="bg-white border-t border-gray-200 mt-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
           <div className="text-center">
@@ -460,7 +468,7 @@ const App = () => {
               <Sparkles className="text-white" size={32} />
             </div>
             <h3 className="text-2xl font-bold text-gray-900 mb-3">
-              Real-Time Recommendation System
+              RecommendAI
             </h3>
             <p className="text-gray-600 mb-6 max-w-2xl mx-auto">
               Powered by XGBoost ML, A/B Testing, AI Search, and Real-time Event Processing. 

@@ -89,9 +89,9 @@ const Navigation = ({
                   <div className="px-4 py-2 text-sm text-gray-600 border-b border-gray-100">
                     Current User: <span className="font-semibold text-gray-800">{currentUser}</span>
                   </div>
-                  {/* BUG-12 fix: functional link to user profile */}
+                  {/* BUG-12 / MED-4 fix: use full backend URL so this doesn't 404 via dev server */}
                   <a
-                    href={`/api/user/${currentUser}/profile`}
+                    href={`${process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000'}/api/user/${currentUser}/profile`}
                     target="_blank"
                     rel="noreferrer"
                     className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center"

@@ -226,7 +226,9 @@ class SearchEngine:
             }).sort([('view_count', -1), ('rating', -1)]).limit(request.limit).to_list(length=request.limit)
 
             if not category_items:
-                category_items = await db.search_items(category, content_type, request.limit)
+                # HIGH-3 fix: normalise content_type — use .value if it's an enum, else pass raw string
+                ct_str = content_type if content_type else (request.content_type.value if request.content_type else None)
+                category_items = await db.search_items(category, ct_str, request.limit)
 
             results = []
             for item in category_items:

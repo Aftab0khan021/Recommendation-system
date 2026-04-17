@@ -220,11 +220,16 @@ class RecommendationSystemTester:
         return success
 
 def main():
-    print("🚀 Starting Recommendation System API Tests")
+    # MED-1 fix: accept optional base URL as first CLI argument
+    # Usage: python backend_test.py [http://localhost:8000]
+    base_url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8000"
+    print(f"🚀 Starting Recommendation System API Tests")
+    print(f"   Target: {base_url}")
     print("=" * 60)
-    
-    tester = RecommendationSystemTester()
-    
+
+    tester = RecommendationSystemTester(base_url=base_url)
+
+
     # Test sequence
     tests = [
         ("Health Check", tester.test_health_check),

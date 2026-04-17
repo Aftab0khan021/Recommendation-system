@@ -8,13 +8,16 @@ from models import User, Item, Interaction, ContentType, InteractionType
 from database import get_db_manager
 
 logger = logging.getLogger(__name__)
-# MISSING-10 fix: seed Faker for reproducible data generation
+
 fake = Faker()
-Faker.seed(42)
-random.seed(42)
 
 class DataSeeder:
     def __init__(self):
+        # MED-5 fix: seed inside __init__, not at module level, so import doesn't
+        # affect global random state in production code paths.
+        Faker.seed(42)
+        random.seed(42)
+
         self.categories_by_type = {
             ContentType.VIDEO: ['Entertainment', 'Education', 'Sports', 'Music', 'News', 'Comedy', 'Tutorial'],
             ContentType.MOVIE: ['Action', 'Comedy', 'Drama', 'Horror', 'Romance', 'Sci-Fi', 'Thriller'],
