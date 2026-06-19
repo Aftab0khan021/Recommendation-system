@@ -254,11 +254,82 @@ class ABTestManager:
                 treatment_interactions / treatment_requests if treatment_requests > 0 else 0
             )
 
+            # Phase 2: Statistical significance (two-proportion z-test)
+            sig = self._calculate_significance(
+                n1=control_requests,
+                c1=control_interactions,
+                n2=treatment_requests,
+                c2=treatment_interactions,
+            )
+            metrics.update(sig)
+
             return metrics
 
         except Exception as e:
             logger.error(f"Error calculating experiment metrics: {e}")
             return {"error": str(e)}
+
+    @staticmethod
+    def _calculate_significance(n1: int, c1: int, n2: int, c2: int) -> Dict[str, Any]:
+        """
+        Two-proportion z-test for statistical significance.
+        n1, n2: number of observations per arm
+        c1, c2: number of conversions (interactions) per arm
+        Returns: z_score, p_value, is_significant, confidence_interval, lift_pct
+        """
+        import math
+
+        if n1 < 5 or n2 < 5:
+            return {
+                "z_score": None, "p_value": None,
+                "is_significant": False,
+                "confidence_level": "Insufficient data (need ≥ 5 requests per arm)",
+                "lift_pct": None,
+            }
+
+        p1 = c1 / n1  # control CTR
+        p2 = c2 / n2  # treatment CTR
+        p_pool = (c1 + c2) / (n1 + n2)  # pooled proportion
+
+        se = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+        if se == 0:
+            return {
+                "z_score": 0.0, "p_value": 1.0,
+                "is_significant": False,
+                "confidence_level": "No variance",
+                "lift_pct": 0.0,
+            }
+
+        z = (p2 - p1) / se
+
+        # Approximated two-tailed p-value from standard normal CDF
+        # Using Horner's method approximation (no scipy needed)
+        def _norm_cdf(x: float) -> float:
+            # Abramowitz & Stegun approximation (max error 7.5e-8)
+            sign = 1 if x >= 0 else -1
+            x = abs(x)
+            t = 1.0 / (1.0 + 0.2316419 * x)
+            poly = t * (0.319381530 + t * (-0.356563782 + t * (
+                1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+            cdf = 1.0 - (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * x * x) * poly
+            return cdf if sign > 0 else 1.0 - cdf
+
+        p_value = 2 * (1 - _norm_cdf(abs(z)))
+        is_sig = p_value < 0.05
+        lift_pct = ((p2 - p1) / p1 * 100) if p1 > 0 else None
+
+        return {
+            "z_score": round(z, 4),
+            "p_value": round(p_value, 6),
+            "is_significant": is_sig,
+            "confidence_level": (
+                "95% confidence ✓" if is_sig else
+                f"Not yet significant (p={round(p_value, 3)})"
+            ),
+            "lift_pct": round(lift_pct, 2) if lift_pct is not None else None,
+            "control_ctr": round(p1 * 100, 2),
+            "treatment_ctr": round(p2 * 100, 2),
+        }
 
     def get_all_experiments(self) -> Dict[str, Any]:
         """Get all experiment configurations and metrics."""

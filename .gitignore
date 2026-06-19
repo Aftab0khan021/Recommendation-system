@@ -86,5 +86,18 @@ android-sdk/
 # MISSING-8: ignore persisted ML model files (large binaries belong in object storage)
 backend/models/
 
-# Backend secrets
-backend/.env
+# ── Environment / Secret files — NEVER commit these ──────────────────────────
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.test
+.env.staging
+backend/.env
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+# pytest cache
+.pytest_cache/
+backend/.pytest_cache/

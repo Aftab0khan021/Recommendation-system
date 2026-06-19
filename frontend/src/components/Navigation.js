@@ -1,184 +1,203 @@
 import React, { useState } from 'react';
-import { User, Settings, TrendingUp, BarChart3, Sparkles, Menu, X } from 'lucide-react';
+import { User, Settings, TrendingUp, BarChart3, Sparkles, Menu, X, Moon, Sun, FlaskConical } from 'lucide-react';
 
 const Navigation = ({ 
   currentUser, 
   onUserChange, 
   onRefresh, 
   loading,
-  stats 
+  stats,
+  darkMode,
+  onDarkModeToggle,
+  activeTab,
+  onTabChange,
 }) => {
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
 
+  const tabs = [
+    { id: 'recommendations', label: 'For You', icon: Sparkles },
+    { id: 'search', label: 'Search', icon: TrendingUp },
+    { id: 'profile', label: 'Profile', icon: User },
+    { id: 'experiments', label: 'A/B Tests', icon: FlaskConical },
+  ];
+
   return (
-    <nav className="bg-white shadow-lg sticky top-0 z-40 border-b border-gray-100">
+    <nav className="glass-nav sticky top-0 z-40">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
-          {/* Logo and Brand */}
+          
+          {/* Logo */}
           <div className="flex items-center">
             <div className="flex items-center space-x-3">
-              <div className="bg-gradient-to-r from-blue-500 to-purple-600 p-2 rounded-xl shadow-lg">
-                <Sparkles className="text-white" size={24} />
+              <div className="bg-gradient-to-br from-blue-500 to-purple-600 p-2 rounded-xl shadow-lg glow-blue">
+                <Sparkles className="text-white" size={22} />
               </div>
               <div>
-                <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                  RecommendAI
-                </h1>
-                <span className="text-xs text-gray-500 hidden sm:block">Intelligent Recommendation System</span>
+                <h1 className="text-xl font-bold gradient-text">RecommendAI</h1>
+                <span className="text-xs text-muted-foreground hidden sm:block">Intelligent Recommendation System</span>
               </div>
             </div>
           </div>
-          
-          {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center space-x-6">
-            {/* Stats Summary */}
+
+          {/* Desktop Tabs */}
+          <div className="hidden md:flex items-center bg-muted/50 rounded-xl p-1 gap-0.5">
+            {tabs.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => onTabChange(id)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+                  activeTab === id
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+                }`}
+              >
+                <Icon size={14} />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Right Controls */}
+          <div className="hidden md:flex items-center space-x-3">
+            {/* Stats pill */}
             {stats && (
-              <div className="flex items-center space-x-4 text-sm text-gray-600">
-                <div className="flex items-center space-x-1">
-                  <User size={16} />
-                  <span>{stats.total_users?.toLocaleString() || 0} users</span>
-                </div>
-                <div className="flex items-center space-x-1">
-                  <BarChart3 size={16} />
-                  <span>{stats.total_items?.toLocaleString() || 0} items</span>
-                </div>
-                <div className="flex items-center space-x-1">
-                  <TrendingUp size={16} />
-                  <span>{stats.active_users_24h?.toLocaleString() || 0} active</span>
-                </div>
+              <div className="flex items-center space-x-3 text-xs text-muted-foreground bg-muted/50 px-3 py-1.5 rounded-xl">
+                <span className="flex items-center gap-1">
+                  <span className="live-dot w-1.5 h-1.5 rounded-full bg-green-400" />
+                  {stats.total_users?.toLocaleString() || 0} users
+                </span>
+                <span>·</span>
+                <span>{stats.total_items?.toLocaleString() || 0} items</span>
               </div>
             )}
 
-            {/* User Input */}
+            {/* User input */}
             <div className="flex items-center space-x-2">
-              <label className="text-sm font-medium text-gray-700">User:</label>
               <div className="relative">
                 <input
                   type="text"
                   value={currentUser}
                   onChange={(e) => onUserChange(e.target.value)}
-                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 w-32"
+                  className="pl-3 pr-8 py-1.5 bg-muted border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all duration-200 w-28 text-foreground placeholder:text-muted-foreground"
                   placeholder="User ID"
                 />
-                <User size={16} className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400" />
+                <User size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
               </div>
             </div>
 
-            {/* Refresh Button */}
+            {/* Refresh */}
             <button
               onClick={onRefresh}
               disabled={loading}
-              className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white px-4 py-2 rounded-lg transition-all duration-200 flex items-center space-x-2 transform hover:scale-105 disabled:transform-none"
+              className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 flex items-center space-x-1.5 hover:scale-105 disabled:scale-100 shadow-md"
             >
-              <TrendingUp size={16} className={loading ? 'animate-spin' : ''} />
-              <span className="hidden lg:inline">{loading ? 'Loading...' : 'Refresh'}</span>
+              <TrendingUp size={14} className={loading ? 'animate-spin' : ''} />
+              <span>{loading ? 'Loading...' : 'Refresh'}</span>
             </button>
 
-            {/* User Menu */}
+            {/* Dark mode toggle */}
+            <button
+              onClick={onDarkModeToggle}
+              aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              className="p-2 rounded-lg bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+
+            {/* Settings dropdown */}
             <div className="relative">
               <button
                 onClick={() => setShowUserMenu(!showUserMenu)}
-                className="bg-gray-100 hover:bg-gray-200 text-gray-600 p-2 rounded-lg transition-colors duration-200"
+                className="p-2 rounded-lg bg-muted hover:bg-muted/80 text-muted-foreground transition-colors"
+                aria-label="Settings"
               >
-                <Settings size={18} />
+                <Settings size={16} />
               </button>
-
               {showUserMenu && (
-                <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-xl border border-gray-200 py-2 z-50">
-                  <div className="px-4 py-2 text-sm text-gray-600 border-b border-gray-100">
-                    Current User: <span className="font-semibold text-gray-800">{currentUser}</span>
+                <div className="absolute right-0 mt-2 w-56 glass-card rounded-xl shadow-xl py-2 z-50 border border-border">
+                  <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
+                    Logged in as <span className="font-semibold text-foreground">{currentUser}</span>
                   </div>
-                  {/* BUG-12 / MED-4 fix: use full backend URL so this doesn't 404 via dev server */}
                   <a
                     href={`${process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000'}/api/user/${currentUser}/profile`}
                     target="_blank"
                     rel="noreferrer"
-                    className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center"
+                    className="w-full text-left px-4 py-2 text-sm text-foreground hover:bg-muted flex items-center gap-2"
                   >
-                    <User size={14} className="mr-2 text-gray-400" />
-                    View Profile (API)
+                    <User size={13} className="text-muted-foreground" />
+                    View API Profile
                   </a>
-                  {/* BUG-12 fix: show 'coming soon' instead of silent no-op */}
-                  <button
-                    onClick={() => alert('Preferences panel coming soon!')}
-                    className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center"
+                  <a
+                    href={`${process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000'}/metrics`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full text-left px-4 py-2 text-sm text-foreground hover:bg-muted flex items-center gap-2"
                   >
-                    <Settings size={14} className="mr-2 text-gray-400" />
-                    Preferences
-                  </button>
-                  <button
-                    onClick={() => alert('Analytics dashboard coming soon!')}
-                    className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center"
-                  >
-                    <BarChart3 size={14} className="mr-2 text-gray-400" />
-                    Analytics
-                  </button>
+                    <BarChart3 size={13} className="text-muted-foreground" />
+                    Prometheus Metrics
+                  </a>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Mobile Menu Button */}
-          <div className="md:hidden">
+          {/* Mobile menu button */}
+          <div className="md:hidden flex items-center gap-2">
+            <button
+              onClick={onDarkModeToggle}
+              className="p-2 rounded-lg bg-muted text-muted-foreground"
+              aria-label="Toggle dark mode"
+            >
+              {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
             <button
               onClick={() => setShowMobileMenu(!showMobileMenu)}
-              className="text-gray-600 hover:text-gray-800 p-2"
+              className="text-muted-foreground hover:text-foreground p-2"
+              aria-label="Toggle menu"
             >
-              {showMobileMenu ? <X size={24} /> : <Menu size={24} />}
+              {showMobileMenu ? <X size={22} /> : <Menu size={22} />}
             </button>
           </div>
         </div>
 
         {/* Mobile Menu */}
         {showMobileMenu && (
-          <div className="md:hidden border-t border-gray-200 py-4">
-            <div className="space-y-4">
-              {/* User Input */}
-              <div className="flex items-center space-x-2">
-                <label className="text-sm font-medium text-gray-700">User:</label>
-                <input
-                  type="text"
-                  value={currentUser}
-                  onChange={(e) => onUserChange(e.target.value)}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Enter user ID"
-                />
-              </div>
-
-              {/* Stats */}
-              {stats && (
-                <div className="grid grid-cols-3 gap-2 text-sm text-gray-600">
-                  <div className="flex items-center space-x-1">
-                    <User size={14} />
-                    <span>{stats.total_users?.toLocaleString() || 0}</span>
-                  </div>
-                  <div className="flex items-center space-x-1">
-                    <BarChart3 size={14} />
-                    <span>{stats.total_items?.toLocaleString() || 0}</span>
-                  </div>
-                  <div className="flex items-center space-x-1">
-                    <TrendingUp size={14} />
-                    <span>{stats.active_users_24h?.toLocaleString() || 0}</span>
-                  </div>
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="flex space-x-2">
+          <div className="md:hidden border-t border-border py-4 space-y-3">
+            {/* Tabs */}
+            <div className="grid grid-cols-2 gap-2">
+              {tabs.map(({ id, label, icon: Icon }) => (
                 <button
-                  onClick={onRefresh}
-                  disabled={loading}
-                  className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white px-4 py-2 rounded-lg transition-all duration-200 flex items-center justify-center space-x-2"
+                  key={id}
+                  onClick={() => { onTabChange(id); setShowMobileMenu(false); }}
+                  className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all ${
+                    activeTab === id
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-muted-foreground'
+                  }`}
                 >
-                  <TrendingUp size={16} className={loading ? 'animate-spin' : ''} />
-                  <span>{loading ? 'Loading...' : 'Refresh'}</span>
+                  <Icon size={14} />
+                  {label}
                 </button>
-                
-                <button className="bg-gray-100 hover:bg-gray-200 text-gray-600 px-4 py-2 rounded-lg transition-colors duration-200">
-                  <Settings size={16} />
-                </button>
-              </div>
+              ))}
+            </div>
+
+            {/* User input + Refresh */}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={currentUser}
+                onChange={(e) => onUserChange(e.target.value)}
+                className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                placeholder="User ID"
+              />
+              <button
+                onClick={onRefresh}
+                disabled={loading}
+                className="bg-gradient-to-r from-blue-600 to-purple-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium"
+              >
+                {loading ? '...' : 'Go'}
+              </button>
             </div>
           </div>
         )}
@@ -186,12 +205,9 @@ const Navigation = ({
 
       {/* Click outside to close menus */}
       {(showUserMenu || showMobileMenu) && (
-        <div 
-          className="fixed inset-0 z-30" 
-          onClick={() => {
-            setShowUserMenu(false);
-            setShowMobileMenu(false);
-          }}
+        <div
+          className="fixed inset-0 z-30"
+          onClick={() => { setShowUserMenu(false); setShowMobileMenu(false); }}
         />
       )}
     </nav>

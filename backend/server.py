@@ -9,8 +9,7 @@ from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 load_dotenv()
 SEED_ON_STARTUP = os.getenv("SEED_ON_STARTUP", "false").lower() == "true"
-# Switch between synthetic (Faker) data and real data from APIs + MovieLens
-USE_REAL_DATA = os.getenv("USE_REAL_DATA", "false").lower() == "true"
+USE_REAL_DATA   = True   # always use real data (synthetic mode removed)
 # How many NEW real-user interactions trigger a background model retrain
 RETRAIN_THRESHOLD = int(os.getenv("RETRAIN_THRESHOLD", "100"))
 _raw_admin_key = os.getenv("ADMIN_API_KEY", "")
@@ -41,6 +40,17 @@ from recommendation_engine import get_recommendation_engine
 from ab_testing import ab_test_manager
 from data_seeder import DataSeeder
 from search_engine import search_engine
+# Phase 2: caching layer
+from cache import (
+    recommendation_cache, search_cache, popular_cache, stats_cache,
+    make_rec_key, make_search_key, make_popular_key
+)
+# Phase 3: metrics
+from metrics import (
+    REC_REQUESTS, REC_LATENCY, SEARCH_REQUESTS, SEARCH_LATENCY,
+    CACHE_HITS, CACHE_MISSES, RETRAIN_DURATION, AB_ASSIGNMENTS,
+    ACTIVE_USERS, EVENT_LOGS, get_metrics_output, track_latency
+)
 
 # Configure logging
 logging.basicConfig(
@@ -75,14 +85,9 @@ async def lifespan(app: FastAPI):
         user_count = await db.db.users.count_documents({})
         item_count = await db.db.items.count_documents({})
         if SEED_ON_STARTUP and (user_count == 0 or item_count == 0):
-            if USE_REAL_DATA:
-                logger.info("Seeding with REAL data (USE_REAL_DATA=true)...")
-                seeder = DataSeeder()
-                await seeder.seed_real_data()
-            else:
-                logger.info("Seeding with synthetic data (SEED_ON_STARTUP=true)...")
-                seeder = DataSeeder()
-                await seeder.seed_all_data(users_count=500, items_count=2000, interactions_count=20000)
+            logger.info("Seeding with REAL data (SEED_ON_STARTUP=true)…")
+            seeder = DataSeeder()
+            await seeder.seed_real_data()
             app_state['data_seeded'] = True
             logger.info("✅ Database seeded")
         else:
@@ -192,6 +197,15 @@ async def log_event(event: EventData, background_tasks: BackgroundTasks):
             logger.info(
                 f"Auto-retrain triggered after {RETRAIN_THRESHOLD} new interactions"
             )
+
+        # Phase 2: Invalidate per-user recommendation cache on new interaction
+        await recommendation_cache.delete_pattern(f"rec:{event.user_id}:")
+
+        # Phase 3: Track metrics
+        try:
+            EVENT_LOGS.labels(interaction_type=event.type.value).inc()
+        except Exception:
+            pass
         
         return {
             "status": "success",
@@ -228,78 +242,98 @@ async def get_recommendations(
     n: int = 10,
     content_type: Optional[str] = None,
     exclude_seen: bool = True,
-    exclude_ids: Optional[str] = None,   # comma-separated item_ids already shown this session
+    exclude_ids: Optional[str] = None,
 ):
     """
     Get personalized recommendations for a user.
-
-    exclude_ids: comma-separated list of item_ids the frontend has already shown
-                 in the current session (e.g. "tmdb_movie_155,rawg_game_12").
-                 The endpoint will NEVER return any of these items, even via
-                 Load More pagination.
+    Phase 2: Results are cached per (user_id, content_type, n) for 60 seconds.
+    Cache is invalidated when the user logs a new interaction.
     """
     try:
-        # Validate parameters (BUG-10 fix: clamp both min and max)
         n = max(1, min(n, 100))
 
-        # Validate content type
         if content_type and content_type not in [ct.value for ct in ContentType]:
             raise HTTPException(status_code=400, detail="Invalid content type")
 
-        # Parse exclude_ids
         excluded_set: List[str] = (
             [eid.strip() for eid in exclude_ids.split(",") if eid.strip()]
             if exclude_ids else []
         )
 
-        # Get A/B test assignment
+        # Phase 2: check cache (skip if exclude_ids present — load-more pagination)
+        cache_key = make_rec_key(user_id, content_type, n)
+        if not excluded_set:
+            cached = await recommendation_cache.get(cache_key)
+            if cached is not None:
+                try:
+                    CACHE_HITS.labels(cache_name="recommendation").inc()
+                except Exception:
+                    pass
+                return cached
+
+        try:
+            CACHE_MISSES.labels(cache_name="recommendation").inc()
+        except Exception:
+            pass
+
         should_use_ml = ab_test_manager.should_use_xgboost(user_id)
         algorithm = "xgboost_ml" if should_use_ml else "popularity_based"
 
-        # Get recommendations
+        # Phase 3: track A/B assignment metrics
+        try:
+            AB_ASSIGNMENTS.labels(
+                experiment="recommendation_algorithm_v1",
+                bucket="treatment" if should_use_ml else "control"
+            ).inc()
+        except Exception:
+            pass
+
         rec_engine = await get_recommendation_engine()
 
-        if should_use_ml and rec_engine.is_trained:
-            recommendations = await rec_engine.get_recommendations(
-                user_id, n, content_type, exclude_ids=excluded_set
-            )
-        else:
-            # Fallback: popularity-based, filtered + title-deduped
-            db = await get_db_manager()
-            # Fetch more than n so we have headroom after filtering
-            popular_items = await db.get_popular_items(content_type, limit=n * 3)
-            recommendations = []
-            seen_titles: set = set()
-            excluded_set_fast: set = set(excluded_set)
+        with track_latency(REC_LATENCY):
+            if should_use_ml and rec_engine.is_trained:
+                recommendations = await rec_engine.get_recommendations(
+                    user_id, n, content_type, exclude_ids=excluded_set
+                )
+            else:
+                db = await get_db_manager()
+                popular_items = await db.get_popular_items(content_type, limit=n * 3)
+                recommendations = []
+                seen_titles: set = set()
+                excluded_set_fast: set = set(excluded_set)
 
-            for item in popular_items:
-                if item['item_id'] in excluded_set_fast:
-                    continue                                  # skip already-shown
-                # Normalised title dedup
-                import re
-                norm = re.sub(r'\s+', ' ',
-                    re.sub(r'[^\w\s]', ' ',
-                    re.sub(r'^(the|a|an)\s+', '',
-                    item['title'].lower().strip()))).strip()
-                if norm in seen_titles:
-                    continue                                  # skip same-title
-                seen_titles.add(norm)
-                recommendations.append({
-                    'item_id': item['item_id'],
-                    'title': item['title'],
-                    'content_type': item['content_type'],
-                    'category': item['category'],
-                    'description': item['description'],
-                    'thumbnail_url': item['thumbnail_url'],
-                    'rating': item['rating'],
-                    'view_count': item['view_count'],
-                    'ml_score': 0.0,
-                    'tags': item.get('tags', [])
-                })
-                if len(recommendations) >= n:
-                    break
+                for item in popular_items:
+                    if item['item_id'] in excluded_set_fast:
+                        continue
+                    import re as _re
+                    norm = _re.sub(r'\s+', ' ',
+                        _re.sub(r'[^\w\s]', ' ',
+                        _re.sub(r'^(the|a|an)\s+', '',
+                        item['title'].lower().strip()))).strip()
+                    if norm in seen_titles:
+                        continue
+                    seen_titles.add(norm)
+                    recommendations.append({
+                        'item_id': item['item_id'],
+                        'title': item['title'],
+                        'content_type': item['content_type'],
+                        'category': item['category'],
+                        'description': item['description'],
+                        'thumbnail_url': item['thumbnail_url'],
+                        'rating': item['rating'],
+                        'view_count': item['view_count'],
+                        'ml_score': 0.0,
+                        'tags': item.get('tags', [])
+                    })
+                    if len(recommendations) >= n:
+                        break
 
-        # Log recommendation request
+        # Phase 3: track request metric
+        try:
+            REC_REQUESTS.labels(algorithm=algorithm, content_type=content_type or "all").inc()
+        except Exception:
+            pass
+
         ab_test_manager.log_experiment_event(
             user_id=user_id,
             experiment_id='recommendation_algorithm_v1',
@@ -314,10 +348,16 @@ async def get_recommendations(
             }
         )
 
-        return RecommendationResponse(
+        response = RecommendationResponse(
             recommendations=recommendations,
             algorithm=algorithm
         )
+
+        # Phase 2: cache result (only when no exclude_ids)
+        if not excluded_set:
+            await recommendation_cache.set(cache_key, response)
+
+        return response
 
     except Exception as e:
         logger.error(f"Error getting recommendations: {e}")
@@ -355,6 +395,73 @@ async def search_items(
     except Exception as e:
         logger.error(f"Error in search: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Search autocomplete / suggestions endpoint (Phase 1)
+@api_router.get("/search/suggest")
+async def search_suggest(
+    q: str = Query(..., description="Partial query string"),
+    limit: int = Query(6, description="Max suggestions to return"),
+    content_type: Optional[str] = Query(None, description="Filter by content type")
+):
+    """Fast autocomplete: returns matching item titles and categories.
+    
+    Used by the frontend search bar dropdown (debounced at 300ms).
+    Falls back to regex search if text index returns nothing.
+    """
+    try:
+        import re as _re
+        # Sanitize and clamp
+        q = q.strip()[:128]
+        limit = min(max(1, limit), 10)
+
+        if not q:
+            return {"suggestions": []}
+
+        db = await get_db_manager()
+
+        match_filter: dict = {}
+        if content_type and content_type in [ct.value for ct in ContentType]:
+            match_filter["content_type"] = content_type
+
+        # Try text-index search first (fastest)
+        try:
+            text_filter = {"$text": {"$search": q}, **match_filter}
+            cursor = db.db.items.find(
+                text_filter,
+                {"title": 1, "content_type": 1, "category": 1, "score": {"$meta": "textScore"}}
+            ).sort([("score", {"$meta": "textScore"})]).limit(limit)
+            items = await cursor.to_list(length=limit)
+        except Exception:
+            items = []
+
+        # Fallback: prefix regex if text search returned nothing
+        if not items:
+            safe_q = _re.escape(q)
+            regex_filter = {
+                "title": {"$regex": f"^{safe_q}", "$options": "i"},
+                **match_filter
+            }
+            cursor = db.db.items.find(
+                regex_filter,
+                {"title": 1, "content_type": 1, "category": 1}
+            ).limit(limit)
+            items = await cursor.to_list(length=limit)
+
+        suggestions = [
+            {
+                "title": item["title"],
+                "content_type": item.get("content_type", ""),
+                "category": item.get("category", "")
+            }
+            for item in items
+        ]
+
+        return {"suggestions": suggestions, "query": q}
+
+    except Exception as e:
+        logger.error(f"Error in search suggest: {e}")
+        return {"suggestions": [], "query": q}
+
 
 # Advanced AI search endpoint
 @api_router.post("/search/ai", response_model=SearchResponse)
@@ -599,60 +706,89 @@ async def retrain_status():
     }
 
 
-# ── Manual seed endpoint (triggers real or synthetic seeding) ─────────────────
+# ── Manual seed endpoint (real data only) ────────────────────────────────────
 @api_router.post("/seed")
 async def seed_database(
     background_tasks: BackgroundTasks,
-    real: bool = False,
     x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
 ):
     """
-    Manually trigger database seeding.
-    - real=false → synthetic Faker data (fast, ~5 sec)
-    - real=true  → real APIs + MovieLens dataset (slower, ~2-5 min)
-    Requires X-Admin-Key header.
+    Manually trigger real-data seeding (TMDB + MovieLens + all 13 sources).
+    Requires X-Admin-Key header matching ADMIN_API_KEY in .env.
     """
     if not ADMIN_API_KEY or x_admin_key != ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing admin key")
 
     async def _seed():
         seeder = DataSeeder()
-        if real:
-            logger.info("[Seed] Starting real data seeding...")
-            await seeder.seed_real_data()
-        else:
-            logger.info("[Seed] Starting synthetic data seeding...")
-            await seeder.seed_all_data()
+        logger.info("[Seed] Starting real data seeding…")
+        await seeder.seed_real_data()
 
     background_tasks.add_task(_seed)
     return {
         "status": "started",
-        "mode": "real" if real else "synthetic",
-        "message": (
-            "Real data seeding started — check logs for progress (~2-5 min)"
-            if real else
-            "Synthetic seeding started — should complete in ~5 seconds"
-        ),
+        "mode": "real",
+        "message": "Real data seeding started — check logs for progress (~2-5 min)",
     }
 
 app.include_router(api_router)
+
+
+# ── Phase 3: Prometheus metrics endpoint ─────────────────────────────────────
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus scrape endpoint — returns metrics in text/plain format."""
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(content=get_metrics_output(), media_type="text/plain")
+
+
+# ── Phase 2: Cache stats (admin) ──────────────────────────────────────────────
+@api_router.get("/admin/cache-stats")
+async def cache_stats(x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")):
+    """Return hit/miss stats for all caches."""
+    if not ADMIN_API_KEY or x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing admin key")
+    return {
+        "recommendation_cache": recommendation_cache.stats(),
+        "search_cache": search_cache.stats(),
+        "popular_cache": popular_cache.stats(),
+        "stats_cache": stats_cache.stats(),
+    }
+
+
+# ── Phase 3: Bandit stats endpoint ────────────────────────────────────────────
+@api_router.get("/ab/bandit-stats/{experiment_id}")
+async def bandit_stats(experiment_id: str):
+    """Return Thompson Sampling bandit arm stats for an experiment."""
+    try:
+        from bandit import get_bandit
+        b = await get_bandit(experiment_id)
+        return await b.get_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Root endpoint
 @app.get("/")
 async def root():
     return {
         "message": "Real-Time Recommendation System API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running",
+        "enhancements": "Phase 1+2+3 complete",
         "endpoints": {
             "health": "/api/health",
             "recommendations": "/api/recommend",
             "search": "/api/search",
+            "search_suggest": "/api/search/suggest",
             "ai_search": "/api/search/ai",
             "events": "/api/event",
             "ab_testing": "/api/ab/arm",
+            "bandit_stats": "/api/ab/bandit-stats/{experiment_id}",
             "popular": "/api/popular",
-            "stats": "/api/stats"
+            "stats": "/api/stats",
+            "metrics": "/metrics",
+            "cache_stats": "/api/admin/cache-stats",
         }
     }
 

@@ -48,6 +48,10 @@ class DatabaseManager:
             await self.db.items.create_index(
                 [("title", "text"), ("description", "text"), ("tags", "text")]
             )
+            # Phase 1: hot-path popularity index (used by get_popular_items)
+            await self.db.items.create_index([("view_count", -1), ("rating", -1)])
+            # Phase 1: filtered popularity (content_type + sort fields)
+            await self.db.items.create_index([("content_type", 1), ("view_count", -1), ("rating", -1)])
 
             # Interactions collection indexes
             await self.db.interactions.create_index("interaction_id", unique=True)
@@ -55,6 +59,10 @@ class DatabaseManager:
             await self.db.interactions.create_index("item_id")
             await self.db.interactions.create_index("timestamp")
             await self.db.interactions.create_index([("user_id", 1), ("timestamp", -1)])
+            # Phase 1: compound index used by co-visitation aggregation pipeline
+            await self.db.interactions.create_index(
+                [("user_id", 1), ("interaction_type", 1), ("timestamp", 1)]
+            )
 
             logger.info("Database indexes created successfully")
 

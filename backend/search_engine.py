@@ -6,6 +6,18 @@ from database import get_db_manager
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_regex(raw, max_len: int = 512) -> str:
+    """Escape user-supplied string for safe use in MongoDB $regex.
+    Prevents ReDoS and regex-injection attacks.
+    Truncates to max_len characters to limit query complexity.
+    Returns empty string for None/empty input.
+    """
+    if not raw:
+        return ""
+    return re.escape(str(raw)[:max_len].strip())
+
+
 class SearchEngine:
     def __init__(self):
         self.search_keywords = {
@@ -54,6 +66,9 @@ class SearchEngine:
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         """Main search function that handles both simple and AI search"""
+        # Phase 1 security: enforce max query length before any processing
+        if len(request.query) > 512:
+            request.query = request.query[:512]
         try:
             if request.search_type == "ai":
                 return await self.ai_search(request)
@@ -220,9 +235,11 @@ class SearchEngine:
             elif request.content_type:
                 match_filter['content_type'] = request.content_type.value
 
+            # Phase 1 security: sanitize category before using in $regex
+            safe_category = _sanitize_regex(category)
             category_items = await db.db.items.find({
                 **match_filter,
-                'category': {'$regex': category, '$options': 'i'}
+                'category': {'$regex': safe_category, '$options': 'i'}
             }).sort([('view_count', -1), ('rating', -1)]).limit(request.limit).to_list(length=request.limit)
 
             if not category_items:
@@ -282,14 +299,15 @@ class SearchEngine:
                 'content_type': {'$in': educational_types}
             }
 
+            # Phase 1 security: sanitize target before using in $regex
+            safe_target = _sanitize_regex(target)
             results = await db.db.items.find({
                 **match_filter,
                 '$or': [
-                    {'title': {'$regex': target, '$options': 'i'}},
-                    {'description': {'$regex': target, '$options': 'i'}},
-                    {'category': {'$regex': target, '$options': 'i'}},
-                    # Bug #11 fix: use $elemMatch for tag regex
-                    {'tags': {'$elemMatch': {'$regex': target, '$options': 'i'}}}
+                    {'title': {'$regex': safe_target, '$options': 'i'}},
+                    {'description': {'$regex': safe_target, '$options': 'i'}},
+                    {'category': {'$regex': safe_target, '$options': 'i'}},
+                    {'tags': {'$elemMatch': {'$regex': safe_target, '$options': 'i'}}}
                 ]
             }).sort([('rating', -1), ('view_count', -1)]).limit(request.limit).to_list(length=request.limit)
 
@@ -314,12 +332,13 @@ class SearchEngine:
                 match_filter['content_type'] = request.content_type.value
 
             if target and target.strip():
+                # Phase 1 security: sanitize target before using in $regex
+                safe_target = _sanitize_regex(target)
                 match_filter['$or'] = [
-                    {'title': {'$regex': target, '$options': 'i'}},
-                    {'description': {'$regex': target, '$options': 'i'}},
-                    {'category': {'$regex': target, '$options': 'i'}},
-                    # Bug #11 fix: use $elemMatch for tag regex
-                    {'tags': {'$elemMatch': {'$regex': target, '$options': 'i'}}}
+                    {'title': {'$regex': safe_target, '$options': 'i'}},
+                    {'description': {'$regex': safe_target, '$options': 'i'}},
+                    {'category': {'$regex': safe_target, '$options': 'i'}},
+                    {'tags': {'$elemMatch': {'$regex': safe_target, '$options': 'i'}}}
                 ]
 
             results = await db.db.items.find(match_filter).sort([
